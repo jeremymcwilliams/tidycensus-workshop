@@ -1,0 +1,351 @@
+---
+title: "tidycensus workshop"
+format: html
+editor: visual
+---
+
+# tidycensus workshop
+
+## outline
+
+-   What is tidycensus?
+
+-   census concepts
+
+-   getting data
+
+-   getting an API key
+
+-   coding examples
+
+------------------------------------------------------------------------
+
+## What is tidycensus?
+
+-   **tidycensus** is an R package that lets you:
+
+    -   Query and receive census data in your R environment
+
+    -   Augment that data with geographic information, allowing easy for mapping
+
+-   More in-depth functionality available [here](https://walker-data.com/census-r/){target="_blank"}.
+
+-   Python equivalent: [censusdata](https://jtleider.github.io/censusdata/){target="_blank"}. [Here's a good tutorial](https://towardsdatascience.com/mapping-us-census-data-with-python-607df3de4b9c){target="_blank"}!
+
+------------------------------------------------------------------------
+
+## Census concepts
+
+-   **Census Data (Decennial)**
+
+    -   Starting in 1790, taken every 10 years
+
+    -   Intended to be a complete enumeration of the US population to assist with *apportionment* (balanced arrangement of Congressional Districts)
+
+    -   Asks a limited set of questions on race, ethnicity, age, sex, and housing tenure
+
+    -   Aims to be precise counts (not estimates)
+
+-   **American Community Survey (formerly Census Long Form)**
+
+    -   Started before 2010 decennial Census
+
+    -   Premier source of detailed demographic information about the US population
+
+    -   Mailed annually to \~3.5% of US households
+
+    -   Two data sets are released:
+
+        -   **1-year ACS** - covers areas of population 65,000 and greater
+
+        -   **5-year ACS** - moving *average* of data over a 5-year period that covers geographies down to the Census block group
+
+    -   Estimates (not precise counts)
+
+-   **Other Data Products**
+
+    -   [There are many](https://api.census.gov/data.html){target="_blank"}, and won't be covered in this workshop. But if you're serious about pursuing this further, it may be worth a deeper dive.
+
+-   **Enumerations / Geographical Units**
+
+    -   States
+
+    -   Counties
+
+    -   Census Tracts
+
+    -   Block Groups (smallest unit for ACS)
+
+    -   Block (smallest unit for Census)
+
+------------------------------------------------------------------------
+
+## Getting Data
+
+The US Government provides three ways to get Census data:
+
+-   From their [website](https://data.census.gov/){target="_blank"}: you search for data, wade through results, and download the data.
+
+-   File Transfer Protocol (FTP) - you can download data in bulk using a program like Filezilla, and connecting to ftp2.census.gov
+
+-   Application Programming Interface (API) - make targeted requests, typically with code. Typically you follow their [documentation](https://www.census.gov/data/developers/guidance/api-user-guide.html){target="_blank"} and acquire a key.
+
+Under the hood, **tidycensus** uses the API to query and receive data.
+
+------------------------------------------------------------------------
+
+## Getting an API key
+
+-   Register for an API key here: <https://api.census.gov/data/key_signup.html>
+
+-   In a few minutes, you should get a message in your inbox with the key, and a link to verify.
+
+------------------------------------------------------------------------
+
+## Coding Examples
+
+### Using data from the decennial census
+
+Let's say we're interested in displaying the **percent of vacant housing units by census tract in Oregon, using data from the 2020 decennial census**.
+
+First, general workflow:
+
+1.  Setup: load libraries and set your API key in the R environment
+2.  Figure out which type of survey you want to query, your geographic scale, and which variable id(s) you need.
+3.  Query the data.
+4.  Transform your data (if necessary).
+5.  Generate your map with ggplot.
+
+*Setup:*
+
+```{r}
+#note: packages are pre-installed
+#if starting from scratch, you would need to run:
+#install.packages("tidycensus")
+#install.packages("tidyverse")
+#install.packages("sf")
+
+
+#load libraries
+library(tidycensus)
+library(tidyverse)
+library(sf)
+
+
+#set API key - enter your own, or use the key above if requesting a key didn't work
+apiKey=""
+census_api_key(apiKey, install = TRUE, overwrite=TRUE)
+
+readRenviron("~/.Renviron")
+
+```
+
+*Figure out what you need to query:*
+
+This is probably the most challenging part, mainly because census data is complex. Where does the data live (decennial or acs), and which variables are in either?
+
+The tidycensus author suggests this strategy: using the [load_variables function](https://walker-data.com/tidycensus/reference/load_variables.html){target="_blank"} to query a given year and data set, and then sift through the variables to determine the ids you need. Here's an example:
+
+```{r}
+#dhc = "Demographic and Housing Characteristics
+#thanks, chatgpt
+
+vars_2020 <- load_variables(2020, "dhc", cache = TRUE)
+View(vars_2020)
+```
+
+This yields over 9,000 results! So you can then sift through the table, or write code to search it for specific phrases.
+
+After playing with this a fair amount, and failing a lot, I think a quicker method is to leverage LLMs like chatgpt or Claude, and just ask it for variable ids from specific surveys. It's not always 100% accurate, but it's pretty good, and generally quick to correct itself if you point out errors. Thanks to Claude, I made a couple cheat sheets for the [2020 decennial census](census-2020-vars.md){target="_blank"} and the [2022 american community survey](acs-2022-vars.md){target="_blank"}.
+
+*Query the data:*
+
+`get_decennial()` [documentation](https://www.rdocumentation.org/packages/tidycensus/versions/1.6.7/topics/get_decennial){target="_blank"}
+
+```{r}
+
+#H1_001N is total housing units
+#H1_003N is vacant housing units
+
+
+vacant_housing <- get_decennial(
+  geography = "tract",
+  state = "OR",
+  variables = c(total_housing = "H1_001N", vacant_housing = "H1_003N"),
+  year = 2020,
+  geometry = TRUE
+)
+
+
+
+
+
+
+```
+
+*Transform your data:*
+
+Let's look at the data. For each census tract, we have two rows - one with total housing counts, and one with vacant housing counts. For choropleth maps, it makes more sense to show percentages rather than totals, so we need to transform our data. The strategy here is:
+
+1.  Use the `pivot_wider()` function to transform total_housing and vacant_housing into columns, and merge each tract into one row.
+2.  Use the `mutate()` function to use the newly created columns above to calculate a percentage.
+
+```{r}
+#transform
+vacant_housing_wider<- vacant_housing |>
+  pivot_wider(
+    names_from = "variable", #looks for distinct names for new columns
+    values_from = "value" #assigns the numeric value from the "value" column
+    
+  )
+
+#note: you can skip this step if you include output="wide" in the data query above....it'll do it for you!
+
+```
+
+```{r}
+#calculate percentage
+# create new column "percent_vacant":
+
+vacant_housing_final<-vacant_housing_tidy |>
+  mutate(percent_vacant=(vacant_housing/total_housing)*100)
+
+
+```
+
+*Create the map:*
+
+```{r}
+ggplot(vacant_housing_final) +
+    geom_sf(mapping=aes(fill = percent_vacant)) +
+    scale_fill_viridis_c(               # this function addresses the legend and color scale
+      name = "% Vacant Residencies",
+      limits = c(0, 100),  # Adjust these limits based on your data
+      labels = scales::label_number(suffix = "%")
+    ) +
+    theme_void() + #removes axes 
+    labs(title="Percentage of vacant residencies in Oregon, by census tract")
+
+
+#save your map to a file:
+ggsave(filename="orVacantHousingByTract.jpg", plot=last_plot())
+```
+
+**YOUR TURN:**
+
+Using the code above as a guide, refer to the included [census variables page](census-2020-vars.md){target="_blank"}, and create a choropleth map of your choosing. For example, you could query the percent of non-family households of census tracts in Multnomah County.
+
+*Query data, using the get_decennial() function:*
+
+```{r}
+
+
+
+
+
+```
+
+*Transform your data:*
+
+```{r}
+
+
+
+```
+
+*Create your map:*
+
+```{r}
+
+
+
+
+
+```
+
+### Querying the American Community Survey
+
+Let's use the American Community Survey 5-year average data to look at poverty rates by county in California. In this case, we're going to use the `get_acs()` function.
+
+Query the data:
+
+`get_acs()` [documentation](https://www.rdocumentation.org/packages/tidycensus/versions/1.6.7/topics/get_acs){target="_blank"}
+
+```{r}
+poverty_data <- get_acs(
+  geography = "county",
+  state = "CA",
+  variables = c(
+    total_population = "B17001_001",  # Total population
+    below_poverty = "B17001_002"      # Population below poverty line
+  ),
+  year = 2022,       # Most recent ACS data
+  survey = "acs5",   # 5-year estimates
+  geometry = TRUE,    # Include spatial data for mapping
+  output= "wide"     #transforms the data for us
+)
+```
+
+Look at the data first!
+
+*Transform your data - Use mutate to calculate percentage:*
+
+```{r}
+# create new column "percent_below"
+
+poverty_data_full<-poverty_data |>
+  mutate(percent_below=(below_povertyE/total_populationE)*100)
+
+```
+
+*Create the map:*
+
+```{r}
+
+ggplot(poverty_data_full) +
+    geom_sf(mapping=aes(fill = percent_below)) +
+    scale_fill_viridis_c(
+      name = "% Below Poverty Level",
+      limits = c(0, 100),  # Adjust these limits based on your data
+      labels = scales::label_number(suffix = "%")
+    ) +
+    theme_void() + #removes axes 
+    labs(title="Estimated California population below poverty line, 2022")
+
+
+
+ggsave(filename = "caPovertyMap.jpg", plot=last_plot())
+
+```
+
+**YOUR TURN:**
+
+Using the code above as a guide, refer to the included [acs variables page](acs-2022-vars.md){target="_blank"}, and create a choropleth map of your choosing. For example, you could query the 5-year average unemployment rate by county in Washington.
+
+*Query data, using the get_decennial() function:*
+
+```{r}
+
+
+
+
+
+```
+
+*Transform your data:*
+
+```{r}
+
+
+
+```
+
+*Create your map:*
+
+```{r}
+
+
+
+
+
+```
